@@ -1,1 +1,293 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Three.js — 10x10 Ground + GLB + HDRi + Adjustable Lights</title>
+  <style>
+    html,body { height:100%; margin:0; }
+    #app { width:100vw; height:100vh; overflow:hidden; display:block; }
+
+    /* small UI styling for loader */
+    #loading {
+      position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+      background: rgba(0,0,0,0.6); color: #fff; padding:8px 12px; border-radius:6px;
+      font-family: Arial, Helvetica, sans-serif; font-size:13px; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="loading">Loading... <span id="progress">0%</span></div>
+
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.152.2/build/three.module.js';
+    import { GLTFLoader } from 'https://unpkg.com/three@0.152.2/examples/jsm/loaders/GLTFLoader.js';
+    import { RGBELoader } from 'https://unpkg.com/three@0.152.2/examples/jsm/loaders/RGBELoader.js';
+    import { OrbitControls } from 'https://unpkg.com/three@0.152.2/examples/jsm/controls/OrbitControls.js';
+    import { GUI } from 'https://unpkg.com/lil-gui@0.18.0/dist/lil-gui.esm.min.js';
+
+    // ---------- Config: change filenames here if you want ----------
+    const MODEL_FILENAME = 'model.glb'; // put your GLB in the same folder
+    const HDRI_FILENAME  = 'env.hdr';   // put your HDR (equirectangular .hdr) in the same folder
+    // ----------------------------------------------------------------
+
+    const container = document.getElementById('app');
+
+    const scene = new THREE.Scene();
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.physicallyCorrectLights = true;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    container.appendChild(renderer.domElement);
+
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+    camera.position.set(6, 6, 6);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.07;
+    controls.screenSpacePanning = false;
+    controls.minDistance = 0.5;
+    controls.maxDistance = 50;
+    controls.target.set(0, 0.9, 0);
+
+    // ---------- Ground (10 x 10) ----------
+    const groundSize = 10;
+    const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x808080,
+      metalness: 0.1,
+      roughness: 0.7
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // subtle grid lines to help orientation
+    const grid = new THREE.GridHelper(groundSize, groundSize, 0x222222, 0x444444);
+    grid.position.y = 0.001; // prevent z-fighting
+    scene.add(grid);
+
+    // ---------- Default lights ----------
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.4);
+    scene.add(hemi);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    dirLight.position.set(5, 8, 5);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.set(2048, 2048);
+    dirLight.shadow.camera.left = -6;
+    dirLight.shadow.camera.right = 6;
+    dirLight.shadow.camera.top = 6;
+    dirLight.shadow.camera.bottom = -6;
+    dirLight.shadow.camera.near = 0.5;
+    dirLight.shadow.camera.far = 30;
+    dirLight.shadow.radius = 4;
+    scene.add(dirLight);
+
+    // small helper geometry to represent the light target
+    const lightTarget = new THREE.Object3D();
+    lightTarget.position.set(0, 0, 0);
+    scene.add(lightTarget);
+    dirLight.target = lightTarget;
+
+    // ---------- Environment (HDRi) ----------
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    pmremGenerator.compileEquirectangularShader();
+
+    const rgbeLoader = new RGBELoader();
+    let envMap = null;
+
+    const loadingDiv = document.getElementById('loading');
+    const progressSpan = document.getElementById('progress');
+
+    rgbeLoader.setDataType(THREE.UnsignedByteType);
+    rgbeLoader.load(HDRI_FILENAME,
+      (texture) => {
+        envMap = pmremGenerator.fromEquirectangular(texture).texture;
+        scene.environment = envMap;
+        scene.background = envMap; // if you prefer solid bg, set to null
+        texture.dispose();
+        pmremGenerator.dispose();
+        progressSpan.textContent = 'HDR loaded';
+      },
+      (xhr) => {
+        if (xhr && xhr.total) progressSpan.textContent = Math.round(xhr.loaded / xhr.total * 100) + '%';
+      },
+      (err) => {
+        console.warn('HDR load failed — using neutral environment.', err);
+        progressSpan.textContent = 'HDR not found';
+      }
+    );
+
+    // ---------- GLB Loader ----------
+    const gltfLoader = new GLTFLoader();
+    let model = null;
+
+    function fitCameraToObject(camera, object, offset = 1.25) {
+      const box = new THREE.Box3().setFromObject(object);
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+
+      const maxSize = Math.max(size.x, size.y, size.z);
+      const fitDistance = maxSize / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5))) * offset;
+
+      const direction = new THREE.Vector3().subVectors(camera.position, center).normalize();
+      camera.position.copy(direction.multiplyScalar(fitDistance).add(center));
+      camera.near = Math.max(0.1, maxSize / 100);
+      camera.far = Math.max(1000, fitDistance * 10 + maxSize);
+      camera.updateProjectionMatrix();
+      controls.target.copy(center);
+      controls.update();
+    }
+
+    gltfLoader.load(MODEL_FILENAME,
+      (gltf) => {
+        model = gltf.scene;
+        model.traverse((child) => {
+          if (child.isMesh) {
+            child.castShadow = true;
+            child.receiveShadow = true;
+            if (child.material) child.material.needsUpdate = true;
+          }
+        });
+
+        // center model and set a small default height offset
+        const box = new THREE.Box3().setFromObject(model);
+        const center = box.getCenter(new THREE.Vector3());
+        model.position.sub(center); // recenter to origin
+
+        scene.add(model);
+
+        // if model is too big or small, scale to fit ground
+        const size = box.getSize(new THREE.Vector3());
+        const desirable = groundSize * 0.6; // keep model within ~60% of ground
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) {
+          const s = desirable / maxDim;
+          if (s < 1) model.scale.setScalar(s);
+        }
+
+        fitCameraToObject(camera, model, 1.4);
+        progressSpan.textContent = 'Model loaded';
+        setTimeout(()=> loadingDiv.style.display = 'none', 600);
+      },
+      (xhr) => {
+        if (xhr && xhr.total) progressSpan.textContent = Math.round(xhr.loaded / xhr.total * 100) + '% (model)';
+      },
+      (err) => {
+        console.error('GLB load error:', err);
+        progressSpan.textContent = 'Model not found';
+      }
+    );
+
+    // ---------- GUI for light + shadows + env ----------
+    const gui = new GUI({ title: 'Scene Controls' });
+    const sceneFolder = gui.addFolder('Environment');
+    const envParams = {
+      envIntensity: 1.0,
+      background: true
+    };
+    sceneFolder.add(envParams, 'envIntensity', 0, 3, 0.01).name('HDR intensity').onChange(v => {
+      if (scene.environment) scene.environment.mapping = THREE.EquirectangularReflectionMapping; // ensure mapping
+      // many materials use envMap intensity via material.envMapIntensity, but we can scale via renderer.toneMappingExposure
+      renderer.toneMappingExposure = v;
+    });
+    sceneFolder.add(envParams, 'background').name('Show env background').onChange(enabled => {
+      scene.background = enabled ? scene.environment : null;
+    });
+    sceneFolder.open();
+
+    const lightFolder = gui.addFolder('Directional Light');
+    const lightParams = {
+      color: dirLight.color.getHex(),
+      intensity: dirLight.intensity,
+      x: dirLight.position.x,
+      y: dirLight.position.y,
+      z: dirLight.position.z,
+      castShadow: dirLight.castShadow,
+      shadowBias: dirLight.shadow.bias || 0,
+      shadowRadius: dirLight.shadow.radius || 1
+    };
+
+    lightFolder.addColor(lightParams, 'color').onChange(v => dirLight.color.setHex(v));
+    lightFolder.add(lightParams, 'intensity', 0, 4, 0.01).onChange(v => dirLight.intensity = v);
+    lightFolder.add(lightParams, 'x', -20, 20, 0.1).onChange(v => dirLight.position.x = v);
+    lightFolder.add(lightParams, 'y', 0, 40, 0.1).onChange(v => dirLight.position.y = v);
+    lightFolder.add(lightParams, 'z', -20, 20, 0.1).onChange(v => dirLight.position.z = v);
+    lightFolder.add(lightParams, 'castShadow').onChange(v => dirLight.castShadow = v);
+    lightFolder.add(lightParams, 'shadowBias', -0.01, 0.01, 0.0001).onChange(v => dirLight.shadow.bias = v);
+    lightFolder.add(lightParams, 'shadowRadius', 0, 10, 0.1).onChange(v => dirLight.shadow.radius = v);
+    lightFolder.open();
+
+    const hemiFolder = gui.addFolder('Hemisphere Light');
+    const hemiParams = { sky: hemi.color.getHex(), ground: hemi.groundColor.getHex(), intensity: hemi.intensity };
+    hemiFolder.addColor(hemiParams, 'sky').onChange(v => hemi.color.setHex(v));
+    hemiFolder.addColor(hemiParams, 'ground').onChange(v => hemi.groundColor.setHex(v));
+    hemiFolder.add(hemiParams,'intensity',0,2,0.01).onChange(v => hemi.intensity = v);
+    hemiFolder.open();
+
+    // ---------- Helpers (optional toggles) ----------
+    const helpers = {
+      showLightHelper: false,
+      showShadowCamera: false
+    };
+
+    let dirHelper = null;
+    let camHelper = null;
+
+    gui.add(helpers, 'showLightHelper').name('Show light helper').onChange(show => {
+      if (show) {
+        dirHelper = new THREE.DirectionalLightHelper(dirLight, 1);
+        scene.add(dirHelper);
+      } else if (dirHelper) {
+        scene.remove(dirHelper);
+        dirHelper = null;
+      }
+    });
+
+    gui.add(helpers, 'showShadowCamera').name('Show shadow frustum').onChange(show => {
+      if (show) {
+        camHelper = new THREE.CameraHelper(dirLight.shadow.camera);
+        scene.add(camHelper);
+      } else if (camHelper) {
+        scene.remove(camHelper);
+        camHelper = null;
+      }
+    });
+
+    // ---------- Animation loop ----------
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      controls.update();
+      if (dirHelper) dirHelper.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // ---------- Resize handling ----------
+    window.addEventListener('resize', onWindowResize);
+    function onWindowResize() {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    }
+
+    // ---------- Tips visible in console ----------
+    console.log('Three.js scene ready. Put "'+MODEL_FILENAME+'" and "'+HDRI_FILENAME+'" in the same folder as this HTML file.');
+    console.log('Run from a local web server (e.g. python -m http.server or npm http-server) to avoid CORS issues.');
+  </script>
+</body>
+</html>
 

@@ -22,10 +22,14 @@
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/RGBELoader.js"></script>
 
   <script>
-    const renderer = new THREE.WebGLRenderer({ antialias:true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.shadowMap.enabled = true;
-    renderer.outputEncoding = THREE.sRGBEncoding;
+  const renderer = new THREE.WebGLRenderer({ antialias:true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  // reduce overall HDR/exposure contribution (darker surroundings)
+  if ('toneMappingExposure' in renderer) renderer.toneMappingExposure = 0.32;
+  // use softer PCF shadows and increase map size for smoother shadows
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.outputEncoding = THREE.sRGBEncoding;
     document.body.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -35,18 +39,29 @@
     controls.target.set(0,1,0);
     controls.update();
 
-    // Lights
-    const dirLight = new THREE.DirectionalLight(0xffffff,1);
-    dirLight.position.set(5,10,5); dirLight.castShadow=true; scene.add(dirLight);
-    scene.add(new THREE.HemisphereLight(0xffffff,0x444444,0.4));
+  // Lights
+  const dirLight = new THREE.DirectionalLight(0xffffff,0.6); // slightly dimmer
+  dirLight.position.set(5,10,5);
+  dirLight.castShadow = true;
+  // configure shadow map for softer, less-contrasty shadows
+  dirLight.shadow.mapSize.width = 2048;
+  dirLight.shadow.mapSize.height = 2048;
+  dirLight.shadow.radius = 4;
+  dirLight.shadow.bias = -0.0005;
+  scene.add(dirLight);
+  // small ambient to lift dark patches (reduced for darker surroundings)
+  scene.add(new THREE.AmbientLight(0xffffff, 0.04));
+  scene.add(new THREE.HemisphereLight(0xffffff,0x444444,0.12));
 
     // HDRI
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     new THREE.RGBELoader().setDataType(THREE.UnsignedByteType)
-      .load('https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/dikhololo_night_2k.hdr',
+      .load('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/satara_night_1k.hdr',
         hdr=>{
           const envMap = pmremGenerator.fromEquirectangular(hdr).texture;
           scene.environment = envMap; scene.background = envMap;
+          // dim environment reflections
+          setEnvironmentIntensity(envIntensity);
           hdr.dispose(); pmremGenerator.dispose();
         },
         undefined,
@@ -59,90 +74,239 @@
     const ui = document.getElementById('ui');
     const status = document.getElementById('status');
 
-    const modelsMeta = [
-      { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/gunsk.glb', name:'หุ่นยนต์ RX-93', scale:0.5, pos:[0,0,0] },
-      //{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/name.glb', name:'นาย ภูวเรศ', scale:0.5, pos:[2,0,0] }
-    ];
-
-    const models=[]; // scene objects
-    const cameraAnchors=[
-      [ new THREE.Vector3(0,2,5), new THREE.Vector3(5,3,5), new THREE.Vector3(0,6,0) ],
-      [ new THREE.Vector3(2,2,5), new THREE.Vector3(5,3,7), new THREE.Vector3(2,5,0) ]
-    ];
-
-    let loadedCount=0;
-
-    function setActiveButton(index){ modelsMeta.forEach((m,i)=>{ if(m._button)m._button.classList.toggle('active',i===index); }); }
-
-
-
-    // Load models
-    modelsMeta.forEach((m,i)=>{
-      const btn=document.createElement('div');
-      btn.className='btn'; btn.textContent=m.name;
-      btn.onclick=()=>{ if(models[i]){ focusOnModel(models[i],0); setActiveButton(i); } };
-      ui.appendChild(btn); m._button=btn;
-
-      loader.load(m.url,(gltf)=>{
-        const root=gltf.scene||gltf.scenes[0];
-        root.scale.set(m.scale,m.scale,m.scale); root.position.set(...m.pos); root.userData.name=m.name;
-        root.traverse(c=>{ if(c.isMesh){c.castShadow=true; c.receiveShadow=true;} });
-        scene.add(root); models[i]=root; loadedCount++;
-        status.textContent=`Loaded ${loadedCount}/${modelsMeta.length}`;
-  // ไม่สร้างปุ่ม anchor
-        if(loadedCount===modelsMeta.length) status.textContent='All models loaded — click a model or anchor';
-      });
-    });
-
-    // Raycaster click
-    renderer.domElement.addEventListener('pointerdown', ev=>{
-      const rect=renderer.domElement.getBoundingClientRect();
-      pointer.x=((ev.clientX-rect.left)/rect.width)*2-1;
-      pointer.y=-((ev.clientY-rect.top)/rect.height)*2+1;
-      raycaster.setFromCamera(pointer,camera);
-      const intersects=raycaster.intersectObjects(scene.children,true);
-      if(intersects.length>0){
-        let hit=intersects[0].object;
-        while(hit && !hit.userData.name) hit=hit.parent;
-        if(hit && hit.userData.name){
-          const idx=models.findIndex(m=>m===hit);
-          focusOnModel(hit,0); if(idx!==-1) setActiveButton(idx);
+  // helper to reduce environment (HDR) contribution on materials
+  const envIntensity = 0.07; // lower = darker HDR reflections
+    function setEnvironmentIntensity(v){
+      scene.traverse(o=>{
+        if(o.isMesh && o.material){
+          const apply = m=>{ if('envMapIntensity' in m) m.envMapIntensity = v; m.needsUpdate = true; };
+          if(Array.isArray(o.material)) o.material.forEach(apply); else apply(o.material);
         }
-      }
-    });
-
-    // Smooth camera animation
-    let cameraAnim={ running:false, startTime:0, duration:700, fromPos:new THREE.Vector3(), toPos:new THREE.Vector3(), fromTarget:new THREE.Vector3(), toTarget:new THREE.Vector3() };
-    function focusOnModel(model, anchorIndex=0){
-      const bbox=new THREE.Box3().setFromObject(model);
-      const center=new THREE.Vector3(); bbox.getCenter(center);
-      let offset;
-      if(cameraAnchors[models.indexOf(model)] && cameraAnchors[models.indexOf(model)][anchorIndex])
-        offset=cameraAnchors[models.indexOf(model)][anchorIndex].clone().sub(center);
-      else offset=new THREE.Vector3(0,1.2,3);
-      const desiredCamPos=center.clone().add(offset);
-      cameraAnim.running=true; cameraAnim.startTime=performance.now();
-      cameraAnim.fromPos.copy(camera.position); cameraAnim.toPos.copy(desiredCamPos);
-      cameraAnim.fromTarget.copy(controls.target); cameraAnim.toTarget.copy(center);
+      });
     }
 
-    window.addEventListener('resize',()=>{
-      camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth,window.innerHeight);
-    });
+    const modelsMeta = [
+      { url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%9E%E0%B8%B7%E0%B9%89%E0%B8%99.glb', name:'', scale:0.5, pos:[0,0,0] },
+      { url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/name.glb', name:'นาย ภูวเรศ', scale:0.5, pos:[3,0,-3] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb', scale:0.5, pos:[0,0,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[1.5,0,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[3,0,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[4.5,0,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[6,0,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[7.5,0,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[8.5,0,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/3%E0%B8%95%E0%B8%B1%E0%B8%A7.glb',  scale:0.5, pos:[1,0.2,0] },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/_boos.glb', name:'มีความเป็นเหล็ก', scale:0.5, pos:[1,0.2,0], materialProps:{ metalness:1.0, roughness:0.15 } },
+{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/bom.glb',  scale:0.5, pos:[-5,0.7,7.5] }
 
-    function animate(){
-      requestAnimationFrame(animate);
-      if(cameraAnim.running){
-        const t=Math.min(1,(performance.now()-cameraAnim.startTime)/cameraAnim.duration);
-        const ease=t*t*(3-2*t);
-        camera.position.lerpVectors(cameraAnim.fromPos,cameraAnim.toPos,ease);
-        controls.target.lerpVectors(cameraAnim.fromTarget,cameraAnim.toTarget,ease);
-        controls.update();
-        if(t>=1) cameraAnim.running=false;
-      }
-      renderer.render(scene,camera);
+
+  ];
+
+  // URL fragment for model(s) to ignore during collision checks
+  const skipCollisionUrlFragment = '3%E0%B8%95%E0%B8%B1%E0%B8%A7.glb';
+
+  const models=[]; // scene objects
+  const cameraAnchors=[
+    [ new THREE.Vector3(0,2,5), new THREE.Vector3(5,3,5), new THREE.Vector3(0,6,0) ],
+    [ new THREE.Vector3(2,2,5), new THREE.Vector3(5,3,7), new THREE.Vector3(2,5,0) ]
+  ];
+
+  let loadedCount=0;
+
+  // find index of the bom model to move right automatically
+  const autoMoveIndex = modelsMeta.findIndex(m=> m.url && m.url.includes('/bom.glb'));
+  // whether the bom auto-move is active (will stop on collision)
+  let autoMoveActive = autoMoveIndex !== -1;
+  // time when auto-move started (used to limit to 1 second)
+  let autoMoveStartTime = null;
+  // central auto-move duration (ms)
+  const AUTO_MOVE_MAX_MS = 15000; // 15 seconds
+  // mutable max that can be extended at runtime
+  let autoMoveMaxMs = AUTO_MOVE_MAX_MS;
+
+  function setActiveButton(index){ modelsMeta.forEach((m,i)=>{ if(m._button)m._button.classList.toggle('active',i===index); }); }
+
+  // Add control buttons for auto-move (start/stop/extend)
+  const startBtn = document.createElement('div'); startBtn.className='btn'; startBtn.textContent='Start Auto-move';
+  const stopBtn = document.createElement('div'); stopBtn.className='btn'; stopBtn.textContent='Stop Auto-move';
+  const extendBtn = document.createElement('div'); extendBtn.className='btn'; extendBtn.textContent='+15s';
+  const loopBtn = document.createElement('div'); loopBtn.className='btn'; loopBtn.textContent='Loop: Off';
+  ui.appendChild(startBtn); ui.appendChild(stopBtn); ui.appendChild(extendBtn);
+  ui.appendChild(loopBtn);
+
+  startBtn.onclick = ()=>{
+    if(autoMoveIndex===-1) { status.textContent='No bom model found to auto-move.'; return; }
+    if(!models[autoMoveIndex]) { status.textContent='bom model not yet loaded.'; return; }
+    autoMoveActive = true; autoMoveStartTime = performance.now();
+    status.textContent = `Auto-move started (max ${Math.round(autoMoveMaxMs/1000)}s)`;
+  };
+  stopBtn.onclick = ()=>{
+    autoMoveActive = false; status.textContent = 'Auto-move stopped (manual)';
+  };
+  extendBtn.onclick = ()=>{
+    autoMoveMaxMs += 15000; // add 15s
+    status.textContent = `Auto-move extended to ${Math.round(autoMoveMaxMs/1000)}s`;
+  };
+
+  // Loop control (enabled by default - automatic looping)
+  let loopEnabled = true;
+  loopBtn.textContent = 'Loop: Auto';
+  loopBtn.onclick = ()=>{
+    loopEnabled = !loopEnabled; loopBtn.textContent = `Loop: ${loopEnabled? 'On':'Off'}`;
+    status.textContent = `Loop ${loopEnabled? 'enabled':'disabled'}`;
+  };
+  status.textContent = 'Looping auto-move is ON';
+
+
+
+  // Load models
+  modelsMeta.forEach((m,i)=>{
+    const btn=document.createElement('div');
+    btn.className='btn'; btn.textContent=m.name;
+    btn.onclick=()=>{ if(models[i]){ focusOnModel(models[i],0); setActiveButton(i); } };
+    ui.appendChild(btn); m._button=btn;
+
+    loader.load(m.url,(gltf)=>{
+    const root=gltf.scene||gltf.scenes[0];
+    root.scale.set(m.scale,m.scale,m.scale); root.position.set(...m.pos); root.userData.name=m.name;
+    root.traverse(c=>{ if(c.isMesh){c.castShadow=true; c.receiveShadow=true;} });
+  scene.add(root); models[i]=root; loadedCount++;
+  // record initial position for auto-move model
+  if(i===autoMoveIndex && models[i]){
+    models[i].userData.__initialPosition = models[i].position.clone();
+  }
+  // ensure new model materials respect env intensity
+  setEnvironmentIntensity(envIntensity);
+  status.textContent=`Loaded ${loadedCount}/${modelsMeta.length}`;
+  // ไม่สร้างปุ่ม anchor
+    if(loadedCount===modelsMeta.length) status.textContent='All models loaded — click a model or anchor';
+    });
+  });
+
+  // Raycaster click
+  renderer.domElement.addEventListener('pointerdown', ev=>{
+    const rect=renderer.domElement.getBoundingClientRect();
+    pointer.x=((ev.clientX-rect.left)/rect.width)*2-1;
+    pointer.y=-((ev.clientY-rect.top)/rect.height)*2+1;
+    raycaster.setFromCamera(pointer,camera);
+    const intersects=raycaster.intersectObjects(scene.children,true);
+    if(intersects.length>0){
+    let hit=intersects[0].object;
+    while(hit && !hit.userData.name) hit=hit.parent;
+    if(hit && hit.userData.name){
+      const idx=models.findIndex(m=>m===hit);
+      focusOnModel(hit,0); if(idx!==-1) setActiveButton(idx);
     }
-    animate();
+    }
+  });
+
+  // Smooth camera animation
+  let cameraAnim={ running:false, startTime:0, duration:700, fromPos:new THREE.Vector3(), toPos:new THREE.Vector3(), fromTarget:new THREE.Vector3(), toTarget:new THREE.Vector3() };
+  function focusOnModel(model, anchorIndex=0){
+    const bbox=new THREE.Box3().setFromObject(model);
+    const center=new THREE.Vector3(); bbox.getCenter(center);
+    let offset;
+    if(cameraAnchors[models.indexOf(model)] && cameraAnchors[models.indexOf(model)][anchorIndex])
+    offset=cameraAnchors[models.indexOf(model)][anchorIndex].clone().sub(center);
+    else offset=new THREE.Vector3(0,1.2,3);
+    const desiredCamPos=center.clone().add(offset);
+    cameraAnim.running=true; cameraAnim.startTime=performance.now();
+    cameraAnim.fromPos.copy(camera.position); cameraAnim.toPos.copy(desiredCamPos);
+    cameraAnim.fromTarget.copy(controls.target); cameraAnim.toTarget.copy(center);
+  }
+  // handle window resize
+  window.addEventListener('resize', ()=>{
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // time tracking for smooth auto movement
+  let lastTime = performance.now();
+
+  // helper: check intersection of moving model with any other model
+  function checkIntersectionWithOthers(moveIndex){
+    const mover = models[moveIndex];
+    if(!mover) return -1;
+    const moverBox = new THREE.Box3().setFromObject(mover);
+    for(let i=0;i<models.length;i++){
+      // skip self and skip first model in the list (index 0) per request
+      if(i===moveIndex) continue;
+      if(i===0) continue;
+      // skip specific model(s) by URL fragment
+      if(modelsMeta[i] && modelsMeta[i].url && modelsMeta[i].url.includes(skipCollisionUrlFragment)) continue;
+      const other = models[i];
+      if(!other) continue;
+      const otherBox = new THREE.Box3().setFromObject(other);
+      if(moverBox.intersectsBox(otherBox)) return i;
+    }
+    return -1;
+  }
+
+  // Dispose helper to free geometry/material resources
+  function disposeModel(obj){
+    if(!obj) return;
+    obj.traverse(n=>{
+      if(n.geometry){ n.geometry.dispose(); }
+      if(n.material){
+        if(Array.isArray(n.material)) n.material.forEach(m=>{ if(m.map) m.map.dispose(); m.dispose(); });
+        else { if(n.material.map) n.material.map.dispose(); n.material.dispose(); }
+      }
+    });
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+
+    const now = performance.now();
+    const dt = (now - lastTime) / 5000; // seconds
+    lastTime = now;
+
+    // auto-move the bom model to the right if loaded and active
+    if(autoMoveActive && autoMoveIndex !== -1 && models[autoMoveIndex]){
+      const nowAuto = performance.now();
+      if(autoMoveStartTime === null) autoMoveStartTime = nowAuto;
+      const elapsedMs = nowAuto - autoMoveStartTime;
+  const maxMs = autoMoveMaxMs;
+      if(elapsedMs <= maxMs){
+        const remaining = Math.max(0, (maxMs - elapsedMs) / 0); // seconds left
+        const moveDt = Math.min(dt, remaining);
+        const speed = 0.8; // units per second
+        const dx = speed * moveDt;
+        models[autoMoveIndex].position.x += dx;
+        // check collision; if collided, log and continue (do not stop or remove)
+        const hit = checkIntersectionWithOthers(autoMoveIndex);
+        if(hit !== -1){
+          console.log('Auto-move: collision with model', hit, '; collision ignored, continuing.');
+          status.textContent = `Auto-move: collision ignored (model ${hit})`;
+          // intentionally do not stop or remove the model on collision
+        }
+      } else {
+  // reached time limit
+  if(loopEnabled && models[autoMoveIndex]){
+    // reset position and restart
+    const init = models[autoMoveIndex].userData && models[autoMoveIndex].userData.__initialPosition;
+    if(init){ models[autoMoveIndex].position.copy(init); }
+    autoMoveStartTime = performance.now();
+    status.textContent = `Auto-move loop restarted`;
+  } else {
+    autoMoveActive = false;
+    status.textContent = `Auto-move finished (${Math.round(autoMoveMaxMs/1000)}s)`;
+  }
+      }
+    }
+
+    if(cameraAnim.running){
+    const t=Math.min(1,(performance.now()-cameraAnim.startTime)/cameraAnim.duration);
+    const ease=t*t*(3-2*t);
+    camera.position.lerpVectors(cameraAnim.fromPos,cameraAnim.toPos,ease);
+    controls.target.lerpVectors(cameraAnim.fromTarget,cameraAnim.toTarget,ease);
+    controls.update();
+    if(t>=1) cameraAnim.running=false;
+    }
+    renderer.render(scene,camera);
+  }
+  animate();
   </script>
 </body>
 </html>

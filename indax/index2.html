@@ -6,15 +6,51 @@
   <style>
     body, html { margin:0; padding:0; overflow:hidden; width:100%; height:100%; font-family:sans-serif; }
     canvas { display:block; width:100vw; height:100vh; }
-  #ui { position:absolute; top:12px; left:12px; display:flex; flex-wrap:wrap; gap:8px; z-index:10; pointer-events:none;}
-  .btn { pointer-events:auto; background:rgba(0,0,0,0.55); color:#fff; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:13px; border:1px solid rgba(255,255,255,0.08);}
-  .btn.active { background:rgba(20,120,255,0.9);}
+  /* main UI (will be wrapped by a menu) */
+  #ui { display:flex; flex-direction:column; gap:8px; }
+    .btn { pointer-events:auto; background:rgba(0,0,0,0.55); color:#fff; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:13px; border:1px solid rgba(255,255,255,0.08); }
+    .btn.active { background:rgba(20,120,255,0.9); }
     #status { position:absolute; right:12px; top:12px; background:rgba(0,0,0,0.5); color:#fff; padding:6px 10px; border-radius:6px; font-size:13px; z-index:10;}
+    /* panel per-model */
+    .panel { pointer-events:auto; background:rgba(0,0,0,0.45); color:#fff; padding:6px; border-radius:6px; display:flex; flex-direction:column; gap:6px; min-width:120px; font-size:13px; border:1px solid rgba(255,255,255,0.06); }
+    .panelTitle { font-weight:600; opacity:0.95; font-size:13px; }
+    .panelRow { display:flex; gap:6px; }
+
+    /* Collapsible menu wrapper positioned in the top-left */
+  .menu { position:absolute; top:12px; left:12px; z-index:20; display:flex; flex-direction:column; align-items:flex-start; gap:8px; }
+  .menu .menuBody { pointer-events:auto; display:block; gap:8px; max-height:calc(100vh - 120px); overflow:auto; padding:6px; background:rgba(0,0,0,0.12); border-radius:6px; margin-top:6px; }
+    /* make each control a block so they stack vertically and won't overlap */
+    .menu .menuBody > * { display:block; margin-bottom:8px; }
+  .menu .menuBody .btn { display:block; width:220px; box-sizing:border-box; }
+  .menu .menuBody .panel { width:220px; box-sizing:border-box; }
+    .panelRow { display:flex; gap:6px; flex-wrap:wrap; }
+    .panelRow .btn { flex:1 1 auto; min-width:80px; }
+    .menu.collapsed { gap:0; }
+    .menu.collapsed .menuBody { display:none; }
+  .menu #menuToggle { background:rgba(0,0,0,0.75); pointer-events:auto; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:15px; color:#fff; border:1px solid rgba(255,255,255,0.08); width:44px; text-align:center; margin-bottom:6px; z-index:30; }
   </style>
 </head>
 <body>
-  <div id="ui"></div>
+  <div class="menu collapsed" id="menu">
+    <div id="menuToggle" class="btn" title="Close menu">✕</div>
+    <div id="ui" class="menuBody"></div>
+  </div>
+  <!-- small handle shown when the full menu is hidden so user can re-open it -->
+  <div id="menuHandle" class="btn" title="Open menu" style="display:none; position:fixed; top:12px; left:12px; z-index:40; width:44px; text-align:center">☰</div>
   <div id="status">Loading models...</div>
+
+  <!-- Preload overlay: simulate download 1..100 before showing models -->
+  <div id="preloadOverlay" style="position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.95);color:#fff;display:flex;align-items:center;justify-content:center;z-index:9999;">
+    <div style="text-align:center;max-width:420px;width:90%;">
+      <h2 style="margin:0 0 12px 0;font-size:20px">กำลังดาวน์โหลดผลงาน</h2>
+      <div id="prePercent" style="font-size:28px;font-weight:700;margin-bottom:10px;">0%</div>
+      <div style="height:12px;background:rgba(255,255,255,0.06);border-radius:6px;overflow:hidden;margin-bottom:12px;">
+        <div id="preBar" style="width:0%;height:100%;background:linear-gradient(90deg,#3aa0ff,#7bd4ff);"></div>
+      </div>
+      <div style="margin-bottom:12px;font-size:13px;opacity:0.85">ระบบจะโหลดจนถึง 100% แล้วคุณจะสามารถเข้าชมผลงานได้</div>
+      <button id="preEnter" disabled style="padding:8px 14px;border-radius:6px;border:none;background:rgba(255,255,255,0.08);color:#fff;cursor:not-allowed">รอให้โหลดเสร็จ...</button>
+    </div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -24,166 +60,452 @@
   <script>
   const renderer = new THREE.WebGLRenderer({ antialias:true });
   renderer.setSize(window.innerWidth, window.innerHeight);
-  // reduce overall HDR/exposure contribution (darker surroundings)
   if ('toneMappingExposure' in renderer) renderer.toneMappingExposure = 0.32;
-  // use softer PCF shadows and increase map size for smoother shadows
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
-    document.body.appendChild(renderer.domElement);
+  document.body.appendChild(renderer.domElement);
 
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
-    camera.position.set(4,2,6);
-    const controls = new THREE.OrbitControls(camera, renderer.domElement);
-    controls.target.set(0,1,0);
-    controls.update();
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.set(4,2,6);
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.target.set(0,1,0);
+  controls.update();
 
-  // Lights
-  const dirLight = new THREE.DirectionalLight(0xffffff,0.6); // slightly dimmer
+  const dirLight = new THREE.DirectionalLight(0xffffff,0.6);
   dirLight.position.set(5,10,5);
   dirLight.castShadow = true;
-  // configure shadow map for softer, less-contrasty shadows
   dirLight.shadow.mapSize.width = 2048;
   dirLight.shadow.mapSize.height = 2048;
   dirLight.shadow.radius = 4;
   dirLight.shadow.bias = -0.0005;
   scene.add(dirLight);
-  // small ambient to lift dark patches (reduced for darker surroundings)
   scene.add(new THREE.AmbientLight(0xffffff, 0.04));
   scene.add(new THREE.HemisphereLight(0xffffff,0x444444,0.12));
 
-    // HDRI
-    const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    new THREE.RGBELoader().setDataType(THREE.UnsignedByteType)
-      .load('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/satara_night_1k.hdr',
-        hdr=>{
-          const envMap = pmremGenerator.fromEquirectangular(hdr).texture;
-          scene.environment = envMap; scene.background = envMap;
-          // dim environment reflections
-          setEnvironmentIntensity(envIntensity);
-          hdr.dispose(); pmremGenerator.dispose();
-        },
-        undefined,
-        err=>console.warn('HDR load error:',err)
-      );
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+  // environment intensity is used in the HDR load callback, declare it before
+  const envIntensity = 0.07;
+  function setEnvironmentIntensity(v){
+    scene.traverse(o=>{
+      if(o.isMesh && o.material){
+        const apply = m=>{ if('envMapIntensity' in m) m.envMapIntensity = v; m.needsUpdate = true; };
+        if(Array.isArray(o.material)) o.material.forEach(apply); else apply(o.material);
+      }
+    });
+  }
 
-    const loader = new THREE.GLTFLoader();
-    const raycaster = new THREE.Raycaster();
-    const pointer = new THREE.Vector2();
-    const ui = document.getElementById('ui');
-    const status = document.getElementById('status');
+  // --- Toon / cel-shading helpers ---
+  function createToonGradient(){
+    const size = 256;
+    const canvas = document.createElement('canvas'); canvas.width = size; canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createLinearGradient(0,0,size,0);
+    grad.addColorStop(0.0, '#ffffff');
+    grad.addColorStop(0.35, '#e9e9e9');
+    grad.addColorStop(0.65, '#bdbdbd');
+    grad.addColorStop(1.0, '#5a5a5a');
+    ctx.fillStyle = grad; ctx.fillRect(0,0,size,size);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.NearestFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
+  }
 
-  // helper to reduce environment (HDR) contribution on materials
-  const envIntensity = 0.07; // lower = darker HDR reflections
-    function setEnvironmentIntensity(v){
-      scene.traverse(o=>{
-        if(o.isMesh && o.material){
-          const apply = m=>{ if('envMapIntensity' in m) m.envMapIntensity = v; m.needsUpdate = true; };
-          if(Array.isArray(o.material)) o.material.forEach(apply); else apply(o.material);
-        }
-      });
+  const toonGradientMap = createToonGradient();
+
+  function toToonMaterial(oldMat){
+    if(!oldMat) return oldMat;
+    if(oldMat.type && oldMat.type.toLowerCase().includes('toon')) return oldMat;
+    const params = {};
+    if(oldMat.color) params.color = oldMat.color.clone();
+    if(oldMat.map) params.map = oldMat.map;
+    if(oldMat.emissive) params.emissive = oldMat.emissive.clone ? oldMat.emissive.clone() : oldMat.emissive;
+    if(oldMat.emissiveMap) params.emissiveMap = oldMat.emissiveMap;
+    if(oldMat.alphaTest) params.alphaTest = oldMat.alphaTest;
+    if(oldMat.transparent) params.transparent = oldMat.transparent;
+    if(typeof oldMat.opacity === 'number') params.opacity = oldMat.opacity;
+    if(oldMat.skinning) params.skinning = oldMat.skinning;
+    if(oldMat.morphTargets) params.morphTargets = oldMat.morphTargets;
+    if(oldMat.normalMap) params.normalMap = oldMat.normalMap;
+    if(oldMat.roughness !== undefined) params.roughness = oldMat.roughness;
+    if(oldMat.metalness !== undefined) params.metalness = oldMat.metalness;
+    if(oldMat.roughnessMap) params.roughnessMap = oldMat.roughnessMap;
+    if(oldMat.metalnessMap) params.metalnessMap = oldMat.metalnessMap;
+    params.gradientMap = toonGradientMap;
+    try{
+      const toon = new THREE.MeshToonMaterial(params);
+      if('side' in oldMat) toon.side = oldMat.side;
+      if('envMapIntensity' in oldMat) toon.envMapIntensity = oldMat.envMapIntensity;
+      else toon.envMapIntensity = Math.max(0.15, (oldMat && oldMat.envMapIntensity) || 0.15);
+      if((!toon.emissive || toon.emissive.equals(new THREE.Color(0,0,0))) && oldMat && !oldMat.emissive){
+        try{ toon.emissive = new THREE.Color(0x111111); }catch(e){}
+      }
+      toon.needsUpdate = true;
+      return toon;
+    }catch(e){ console.warn('Failed to create toon material, falling back to old material', e); return oldMat; }
+  }
+
+  new THREE.RGBELoader().setDataType(THREE.UnsignedByteType)
+    .load('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/satara_night_1k.hdr',
+      hdr=>{
+        const envMap = pmremGenerator.fromEquirectangular(hdr).texture;
+        scene.environment = envMap; scene.background = envMap;
+        setEnvironmentIntensity(envIntensity);
+        hdr.dispose(); pmremGenerator.dispose();
+      },
+      undefined,
+      err=>console.warn('HDR load error:',err)
+    );
+
+  // (rain will be initialized after the rain functions are defined)
+
+  const loader = new THREE.GLTFLoader();
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  const ui = document.getElementById('ui');
+  const menu = document.getElementById('menu');
+  const menuToggle = document.getElementById('menuToggle');
+  const status = document.getElementById('status');
+
+  // --- Rain particle system ---
+  const RAIN_COUNT = 800;
+  let rainGeo, rainMaterial, rainPoints;
+  const rainVel = new Float32Array(RAIN_COUNT);
+  let rainLast = performance.now();
+
+  function initRain(){
+    rainGeo = new THREE.BufferGeometry();
+    const positions = new Float32Array(RAIN_COUNT * 3);
+    for(let i=0;i<RAIN_COUNT;i++){
+      const x = (Math.random()-0.5) * 40;
+      const y = Math.random() * 25 + 5;
+      const z = (Math.random()-0.5) * 40;
+      positions[i*3+0] = x;
+      positions[i*3+1] = y;
+      positions[i*3+2] = z;
+      rainVel[i] = 15 + Math.random()*25; // units per second
     }
+    rainGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    rainMaterial = new THREE.PointsMaterial({ color:0x99ccff, size:0.12, transparent:true, opacity:0.75, depthWrite:false });
+    rainPoints = new THREE.Points(rainGeo, rainMaterial);
+    rainPoints.frustumCulled = false;
+    scene.add(rainPoints);
+  }
 
-    const modelsMeta = [
-      { url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%9E%E0%B8%B7%E0%B9%89%E0%B8%99.glb', name:'', scale:0.5, pos:[0,0,0] },
-      { url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/name.glb', name:'นาย ภูวเรศ', scale:0.5, pos:[3,0,-3] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb', scale:0.5, pos:[0,0,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[1.5,0,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[3,0,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[4.5,0,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[6,0,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[7.5,0,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[8.5,0,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/3%E0%B8%95%E0%B8%B1%E0%B8%A7.glb',  scale:0.5, pos:[1,0.2,0] },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/_boos.glb', name:'มีความเป็นเหล็ก', scale:0.5, pos:[1,0.2,0], materialProps:{ metalness:1.0, roughness:0.15 } },
-{ url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/bom.glb',  scale:0.5, pos:[-5,0.7,7.5] }
+  function updateRain(){
+    if(!rainGeo) return;
+    const nowR = performance.now();
+    const dt = Math.min(0.1, (nowR - rainLast) / 1000); // clamp to avoid large steps
+    rainLast = nowR;
+    const pos = rainGeo.attributes.position.array;
+    for(let i=0;i<RAIN_COUNT;i++){
+      const idx = i*3 + 1;
+      pos[idx] -= rainVel[i] * dt;
+      if(pos[idx] < 0){
+        // respawn above
+        pos[i*3+0] = (Math.random()-0.5) * 40;
+        pos[i*3+1] = Math.random() * 25 + 10;
+        pos[i*3+2] = (Math.random()-0.5) * 40;
+      }
+    }
+    rainGeo.attributes.position.needsUpdate = true;
+  }
 
+  // initialize rain after functions are defined
+  initRain();
 
+  const modelsMeta = [
+    { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%9E%E0%B8%B7%E0%B9%89%E0%B8%99.glb', name:'', scale:0.5, pos:[0,0,0] },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/name.glb', name:'นาย ภูวเรศ', scale:0.5, pos:[3,0,-3], lookAt:[3,0.9,-2.2], cameraAnchors:[[4,0,-20],[5,2,5]] },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb', scale:0.5, pos:[0,0,0], noToon:true },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[1.5,0,0], noToon:true },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[3,0,0], noToon:true },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[4.5,0,0], noToon:true },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[6,0,0], noToon:true },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[7.5,0,0], noToon:true },
+  { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/%E0%B8%95%E0%B8%B6%E0%B8%81.glb',  scale:0.5, pos:[8.5,0,0], noToon:true },
+    { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/3%E0%B8%95%E0%B8%B1%E0%B8%A7.glb', name:'Focus: jim 3',  scale:0.5, pos:[1,0.2,0] },
+    { url:'https://raw.githubusercontent.com/kenxd823/ken.io/main/indax/_boos.glb', name:'Focus: boss', scale:0.5, pos:[1,0.2,0], materialProps:{ metalness:1.0, roughness:0.15 } },
+    { url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/bom.glb', name:'Focus: bom', scale:0.5, pos:[-5,0.7,7.5] },
+     { url:'https://raw.githubusercontent.com/kenxd823/ken.io/refs/heads/main/indax/tree.glb', name:'Focus: tree', scale:5, pos:[1,0,0] }
+    
   ];
 
-  // URL fragment for model(s) to ignore during collision checks
   const skipCollisionUrlFragment = '3%E0%B8%95%E0%B8%B1%E0%B8%A7.glb';
 
   const models=[]; // scene objects
-  const cameraAnchors=[
-    [ new THREE.Vector3(0,2,5), new THREE.Vector3(5,3,5), new THREE.Vector3(0,6,0) ],
-    [ new THREE.Vector3(2,2,5), new THREE.Vector3(5,3,7), new THREE.Vector3(2,5,0) ]
-  ];
+  const cameraAnchors=[ /* optional per-model anchors (world positions) will be created on load if missing */ ];
 
   let loadedCount=0;
-
-  // find index of the bom model to move right automatically
   const autoMoveIndex = modelsMeta.findIndex(m=> m.url && m.url.includes('/bom.glb'));
-  // whether the bom auto-move is active (will stop on collision)
   let autoMoveActive = autoMoveIndex !== -1;
-  // time when auto-move started (used to limit to 1 second)
   let autoMoveStartTime = null;
-  // central auto-move duration (ms)
-  const AUTO_MOVE_MAX_MS = 15000; // 15 seconds
-  // mutable max that can be extended at runtime
+  const AUTO_MOVE_MAX_MS = 15000;
   let autoMoveMaxMs = AUTO_MOVE_MAX_MS;
 
   function setActiveButton(index){ modelsMeta.forEach((m,i)=>{ if(m._button)m._button.classList.toggle('active',i===index); }); }
 
-  // Add control buttons for auto-move (start/stop/extend)
+  // Control buttons
   const startBtn = document.createElement('div'); startBtn.className='btn'; startBtn.textContent='Start Auto-move';
   const stopBtn = document.createElement('div'); stopBtn.className='btn'; stopBtn.textContent='Stop Auto-move';
-  const extendBtn = document.createElement('div'); extendBtn.className='btn'; extendBtn.textContent='+15s';
   const loopBtn = document.createElement('div'); loopBtn.className='btn'; loopBtn.textContent='Loop: Off';
-  ui.appendChild(startBtn); ui.appendChild(stopBtn); ui.appendChild(extendBtn);
-  ui.appendChild(loopBtn);
+  ui.appendChild(startBtn); ui.appendChild(stopBtn); ui.appendChild(loopBtn);
 
-  startBtn.onclick = ()=>{
-    if(autoMoveIndex===-1) { status.textContent='No bom model found to auto-move.'; return; }
-    if(!models[autoMoveIndex]) { status.textContent='bom model not yet loaded.'; return; }
-    autoMoveActive = true; autoMoveStartTime = performance.now();
-    status.textContent = `Auto-move started (max ${Math.round(autoMoveMaxMs/1000)}s)`;
+  // Quick focus button for model index 1 (นาย ภูวเรศ)
+  const focusNameBtn = document.createElement('div'); focusNameBtn.className='btn'; focusNameBtn.textContent = 'Focus: นาย ภูวเรศ';
+  focusNameBtn.onclick = ()=>{
+    const idx = 1;
+    if(!models[idx]){ status.textContent = 'Model not loaded yet'; return; }
+    // use modelsMeta lookAt if provided
+    let lookAtWorld = undefined;
+    if(modelsMeta[idx] && modelsMeta[idx].lookAt && Array.isArray(modelsMeta[idx].lookAt) && modelsMeta[idx].lookAt.length>=3){
+      lookAtWorld = new THREE.Vector3(modelsMeta[idx].lookAt[0], modelsMeta[idx].lookAt[1], modelsMeta[idx].lookAt[2]);
+    }
+    focusOnModel(models[idx], 0, lookAtWorld);
+    setActiveButton(idx);
   };
-  stopBtn.onclick = ()=>{
-    autoMoveActive = false; status.textContent = 'Auto-move stopped (manual)';
-  };
-  extendBtn.onclick = ()=>{
-    autoMoveMaxMs += 15000; // add 15s
-    status.textContent = `Auto-move extended to ${Math.round(autoMoveMaxMs/1000)}s`;
-  };
+  ui.appendChild(focusNameBtn);
 
-  // Loop control (enabled by default - automatic looping)
+  
+
+  // Menu toggle behavior (close hides full menu and shows a small handle)
+  const menuHandle = document.getElementById('menuHandle');
+  function showMenu(){ menu.classList.remove('collapsed'); menu.style.display = 'flex'; if(menuToggle){ menuToggle.textContent = '✕'; menuToggle.title='Close menu'; } if(menuHandle) menuHandle.style.display='none'; }
+  function hideMenu(){ menu.classList.add('collapsed'); menu.style.display = 'none'; if(menuToggle){ menuToggle.textContent = '☰'; menuToggle.title='Open menu'; } if(menuHandle) menuHandle.style.display='block'; }
+  if(menuToggle){
+    menuToggle.onclick = ()=>{ hideMenu(); };
+  }
+  if(menuHandle){
+    menuHandle.onclick = ()=>{ showMenu(); };
+  }
+
+  startBtn.onclick = ()=>{ if(autoMoveIndex===-1) { status.textContent='No bom model found to auto-move.'; return; } if(!models[autoMoveIndex]) { status.textContent='bom model not yet loaded.'; return; } autoMoveActive = true; autoMoveStartTime = performance.now(); status.textContent = `Auto-move started (max ${Math.round(autoMoveMaxMs/1000)}s)`; };
+  stopBtn.onclick = ()=>{ autoMoveActive = false; status.textContent = 'Auto-move stopped (manual)'; };
+
   let loopEnabled = true;
   loopBtn.textContent = 'Loop: Auto';
-  loopBtn.onclick = ()=>{
-    loopEnabled = !loopEnabled; loopBtn.textContent = `Loop: ${loopEnabled? 'On':'Off'}`;
-    status.textContent = `Loop ${loopEnabled? 'enabled':'disabled'}`;
-  };
+  loopBtn.onclick = ()=>{ loopEnabled = !loopEnabled; loopBtn.textContent = `Loop: ${loopEnabled? 'On':'Off'}`; status.textContent = `Loop ${loopEnabled? 'enabled':'disabled'}`; };
   status.textContent = 'Looping auto-move is ON';
 
-
-
-  // Load models
+  // For each model meta, create a small panel (Focus / Cycle Anchor)
   modelsMeta.forEach((m,i)=>{
-    const btn=document.createElement('div');
-    btn.className='btn'; btn.textContent=m.name;
-    btn.onclick=()=>{ if(models[i]){ focusOnModel(models[i],0); setActiveButton(i); } };
-    ui.appendChild(btn); m._button=btn;
-
-    loader.load(m.url,(gltf)=>{
-    const root=gltf.scene||gltf.scenes[0];
-    root.scale.set(m.scale,m.scale,m.scale); root.position.set(...m.pos); root.userData.name=m.name;
-    root.traverse(c=>{ if(c.isMesh){c.castShadow=true; c.receiveShadow=true;} });
-  scene.add(root); models[i]=root; loadedCount++;
-  // record initial position for auto-move model
-  if(i===autoMoveIndex && models[i]){
-    models[i].userData.__initialPosition = models[i].position.clone();
-  }
-  // ensure new model materials respect env intensity
-  setEnvironmentIntensity(envIntensity);
-  status.textContent=`Loaded ${loadedCount}/${modelsMeta.length}`;
-  // ไม่สร้างปุ่ม anchor
-    if(loadedCount===modelsMeta.length) status.textContent='All models loaded — click a model or anchor';
-    });
+    // Only create UI entries for models with index >= 9 (hide 0..8 from menu)
+    if(i>=9){
+      // model list button (existing)
+      const btn=document.createElement('div');
+      btn.className='btn'; btn.textContent=m.name || `Model ${i}`;
+      btn.onclick=()=>{
+        if(models[i]){
+          // use modelsMeta lookAt if provided (world-space target)
+          let lookAtWorld = undefined;
+          if(modelsMeta[i] && modelsMeta[i].lookAt && Array.isArray(modelsMeta[i].lookAt) && modelsMeta[i].lookAt.length>=3){
+            lookAtWorld = new THREE.Vector3(modelsMeta[i].lookAt[0], modelsMeta[i].lookAt[1], modelsMeta[i].lookAt[2]);
+          }
+          focusOnModel(models[i], 0, lookAtWorld);
+          setActiveButton(i);
+        }
+      };
+      ui.appendChild(btn); m._button=btn;
+    }
   });
+window.__bomShaderUniformsList = window.__bomShaderUniformsList || [];
 
-  // Raycaster click
+  // Defer actual GLTF loading until user finishes preloader and clicks Enter
+  
+  async function loadModels(){
+    loadedCount = 0;
+    status.textContent = 'Starting model load...';
+    for(let i=0;i<modelsMeta.length;i++){
+      const m = modelsMeta[i];
+      try{
+        // eslint-disable-next-line no-loop-func
+        await new Promise((resolve,reject)=>{
+          loader.load(m.url,(gltf)=>{
+            const root=gltf.scene||gltf.scenes[0];
+
+            const isBom = m.url && m.url.toLowerCase().includes('/bom.glb');
+
+            if(isBom){
+              // Create shader uniforms for this bom model
+              const bomUniforms = {
+                time: { value: 0.0 },
+                amplitude: { value: 0.22 },
+                colorA: { value: new THREE.Color(0.9, 0.6, 0.2) },
+                colorB: { value: new THREE.Color(0.2, 0.6, 0.9) },
+                lightDir: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() }
+              };
+
+              // Simple vertex + fragment shader that displaces along normal and shades by normal & vUv
+              const vertexShader = `
+    precision mediump float;
+    attribute float aWeight;
+    attribute float aPhase;
+    uniform float uTime;
+    uniform float uWindAmp;
+    uniform float uWindFreq;
+    uniform float uGust;
+    uniform float uTwist;
+    uniform float uVibe;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    void main(){
+      vUv = uv;
+      vNormal = normalMatrix * normal;
+      vec3 p = position;
+      float w = clamp(aWeight, 0.0, 1.0);
+      float t = uTime;
+      float spatial = p.x * 0.13 + p.y * 0.11 + p.z * 0.09;
+      float swayX = sin( (t * uWindFreq) + spatial + aPhase * 1.37 ) * (uWindAmp * 1.0) * pow(w,1.4) * uGust;
+      float swayY = sin( (t * uWindFreq * 1.2) + spatial*0.7 + aPhase * 0.73 ) * (uWindAmp * 0.45) * pow(w,1.1) * uGust;
+      float swayZ = sin( (t * uWindFreq * 0.85) + spatial*1.1 + aPhase * 1.9 ) * (uWindAmp * 1.2) * pow(w,1.6) * uGust;
+      float angle = sin( t * uWindFreq * 0.6 + aPhase ) * 0.18 * uTwist * w;
+      float c = cos(angle), s = sin(angle);
+      float rx = p.x * c - p.z * s;
+      float rz = p.x * s + p.z * c;
+      float vibe = sin(t * 20.0 + aPhase*7.0) * uVibe * (0.25 + 0.75 * w);
+      vec3 displaced = vec3(rx + swayX, p.y + swayY + vibe, rz + swayZ);
+      displaced += normalize(normal) * (uWindAmp * 0.08 * w * uGust);
+      vec4 mvPos = modelViewMatrix * vec4(displaced, 1.0);
+      vWorldPos = (modelMatrix * vec4(displaced,1.0)).xyz;
+      gl_Position = projectionMatrix * mvPos;
+    }
+  `;
+
+  const fragmentShader = `
+    precision mediump float;
+    uniform vec3 uColorA;
+    uniform vec3 uColorB;
+    uniform vec3 uLightDir;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    void main(){
+      vec3 N = normalize(vNormal);
+      float lam = max(dot(N, normalize(uLightDir)), 0.0);
+      float t = smoothstep(-0.5, 2.5, vWorldPos.y);
+      vec3 base = mix(uColorA, uColorB, t + vUv.y * 0.12);
+      float rim = pow(1.0 - max(dot(N, vec3(0.0, 0.6, 0.8)), 0.0), 2.0) * 0.12;
+      vec3 col = base * (0.28 + lam * 0.72) + rim;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+              // Replace each mesh material with a ShaderMaterial for bom model
+              root.traverse(n=>{
+                if(n.isMesh){
+                  // clone geometry so other instances are not affected
+                  try{
+                    if(n.geometry) n.geometry = n.geometry.clone();
+                  }catch(e){}
+                  const mat = new THREE.ShaderMaterial({
+                    vertexShader,
+                    fragmentShader,
+                    uniforms: THREE.UniformsUtils.clone(bomUniforms),
+                    side: THREE.DoubleSide,
+                    // enable these if you need standard derivatives or other features
+                    // lights: false,
+                  });
+
+                  // If the mesh has vertex colors, let the shader sample them by enabling vertexColors (user shader not using it now)
+                  // mat.vertexColors = n.geometry.attributes.color ? true : false;
+
+                  n.material && (n.material.dispose && n.material.dispose());
+                  n.material = mat;
+                  n.castShadow = true;
+                  n.receiveShadow = true;
+
+                  // store uniform reference so the global list can update it each frame
+                  if(n.material && n.material.uniforms && n.material.uniforms.time){
+                    // push the material's uniforms (same reference as material.uniforms)
+                    window.__bomShaderUniformsList.push(n.material.uniforms);
+                  }
+                }
+              });
+
+            } else {
+              // convert materials to toon/cel-shaded materials unless disabled per-model
+              if(!m.noToon){
+                root.traverse(n=>{
+                  if(n.isMesh && n.material){
+                    if(Array.isArray(n.material)) n.material = n.material.map(toToonMaterial);
+                    else n.material = toToonMaterial(n.material);
+                  }
+                });
+              }
+            }
+
+            root.scale.set(m.scale,m.scale,m.scale);
+            root.position.set(...m.pos);
+            root.userData.name = m.name || (`Model ${i}`);
+            root.traverse(c=>{ if(c.isMesh){c.castShadow=true; c.receiveShadow=true;} });
+            scene.add(root); models[i]=root; loadedCount++;
+
+            // create per-model camera anchors (absolute world positions) if missing
+            const bbox = new THREE.Box3().setFromObject(root);
+            const center = new THREE.Vector3(); bbox.getCenter(center);
+            if(!cameraAnchors[i]){
+              if(m.cameraAnchors && Array.isArray(m.cameraAnchors) && m.cameraAnchors.length>0){
+                cameraAnchors[i] = m.cameraAnchors.map(a=> new THREE.Vector3(a[0], a[1], a[2]));
+              } else {
+                cameraAnchors[i] = [
+                  center.clone().add(new THREE.Vector3(0,2,5)),
+                  center.clone().add(new THREE.Vector3(2,2,5)),
+                  center.clone().add(new THREE.Vector3(-2,2,5))
+                ];
+              }
+            }
+            root.userData._anchorIndex = root.userData._anchorIndex || 0;
+            if(i===autoMoveIndex && models[i]) models[i].userData.__initialPosition = models[i].position.clone();
+            setEnvironmentIntensity(envIntensity);
+            status.textContent=`Loaded ${loadedCount}/${modelsMeta.length}`;
+            resolve();
+          }, undefined, (err)=>{
+            console.error('Model load error', m.url, err);
+            status.textContent = `Failed to load model ${i}: ${m.url}`;
+            // count failures and continue
+            loadedCount++;
+            resolve();
+          });
+        });
+      }catch(e){ console.error('Unexpected load error',e); }
+    }
+    status.textContent = 'All model load attempts complete';
+  }
+
+  // Preloader simulation 0..100
+  const preBar = document.getElementById('preBar');
+  const prePercent = document.getElementById('prePercent');
+  const preEnter = document.getElementById('preEnter');
+  let preValue = 0;
+  function advancePreloader(){
+    if(preValue >= 100) return;
+    preValue += Math.ceil(Math.random()*4); // random step
+    if(preValue > 100) preValue = 100;
+    if(preBar) preBar.style.width = preValue + '%';
+    if(prePercent) prePercent.textContent = preValue + '%';
+    if(preValue >= 100){
+      preEnter.disabled = false; preEnter.style.cursor='pointer'; preEnter.style.background='#2a6bd6'; preEnter.textContent='เข้าชมผลงาน';
+    } else {
+      setTimeout(advancePreloader, 120 + Math.random()*240);
+    }
+  }
+  advancePreloader();
+
+  preEnter.onclick = async ()=>{
+    if(preValue < 100) return; // guard
+    // hide overlay
+    const overlay = document.getElementById('preloadOverlay'); if(overlay) overlay.style.display='none';
+    // begin loading models
+    await loadModels();
+  };
+
+  
+  // Raycaster click to focus on clicked model
   renderer.domElement.addEventListener('pointerdown', ev=>{
     const rect=renderer.domElement.getBoundingClientRect();
     pointer.x=((ev.clientX-rect.left)/rect.width)*2-1;
@@ -191,12 +513,19 @@
     raycaster.setFromCamera(pointer,camera);
     const intersects=raycaster.intersectObjects(scene.children,true);
     if(intersects.length>0){
-    let hit=intersects[0].object;
-    while(hit && !hit.userData.name) hit=hit.parent;
-    if(hit && hit.userData.name){
-      const idx=models.findIndex(m=>m===hit);
-      focusOnModel(hit,0); if(idx!==-1) setActiveButton(idx);
-    }
+      let hit=intersects[0].object;
+      while(hit && !hit.userData.name) hit=hit.parent;
+      if(hit && hit.userData.name){
+        const idx=models.findIndex(m=>m===hit);
+        // prepare optional lookAt (from metadata) and anchor index
+        let lookAtWorld = undefined;
+        if(idx!==-1 && modelsMeta[idx] && modelsMeta[idx].lookAt && Array.isArray(modelsMeta[idx].lookAt) && modelsMeta[idx].lookAt.length>=3){
+          lookAtWorld = new THREE.Vector3(modelsMeta[idx].lookAt[0], modelsMeta[idx].lookAt[1], modelsMeta[idx].lookAt[2]);
+        }
+        const anchorIndex = (models[idx] && models[idx].userData && typeof models[idx].userData._anchorIndex === 'number') ? models[idx].userData._anchorIndex : 0;
+        focusOnModel(models[idx] || hit, anchorIndex, lookAtWorld);
+        if(idx!==-1) setActiveButton(idx);
+      }
     }
   });
 
@@ -205,35 +534,35 @@
   function focusOnModel(model, anchorIndex=0){
     const bbox=new THREE.Box3().setFromObject(model);
     const center=new THREE.Vector3(); bbox.getCenter(center);
-    let offset;
-    if(cameraAnchors[models.indexOf(model)] && cameraAnchors[models.indexOf(model)][anchorIndex])
-    offset=cameraAnchors[models.indexOf(model)][anchorIndex].clone().sub(center);
-    else offset=new THREE.Vector3(0,1.2,3);
-    const desiredCamPos=center.clone().add(offset);
+    // if we have an anchor for this model use it (anchors stored as world camera positions)
+    const idx = models.indexOf(model);
+    let desiredCamPos;
+    if(cameraAnchors[idx] && cameraAnchors[idx][anchorIndex]){
+      desiredCamPos = cameraAnchors[idx][anchorIndex].clone();
+    } else {
+      // fallback: position relative to model center
+      desiredCamPos = center.clone().add(new THREE.Vector3(0,1.2,3));
+    }
     cameraAnim.running=true; cameraAnim.startTime=performance.now();
     cameraAnim.fromPos.copy(camera.position); cameraAnim.toPos.copy(desiredCamPos);
     cameraAnim.fromTarget.copy(controls.target); cameraAnim.toTarget.copy(center);
   }
-  // handle window resize
+
   window.addEventListener('resize', ()=>{
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // time tracking for smooth auto movement
   let lastTime = performance.now();
 
-  // helper: check intersection of moving model with any other model
   function checkIntersectionWithOthers(moveIndex){
     const mover = models[moveIndex];
     if(!mover) return -1;
     const moverBox = new THREE.Box3().setFromObject(mover);
     for(let i=0;i<models.length;i++){
-      // skip self and skip first model in the list (index 0) per request
       if(i===moveIndex) continue;
       if(i===0) continue;
-      // skip specific model(s) by URL fragment
       if(modelsMeta[i] && modelsMeta[i].url && modelsMeta[i].url.includes(skipCollisionUrlFragment)) continue;
       const other = models[i];
       if(!other) continue;
@@ -243,7 +572,6 @@
     return -1;
   }
 
-  // Dispose helper to free geometry/material resources
   function disposeModel(obj){
     if(!obj) return;
     obj.traverse(n=>{
@@ -254,56 +582,209 @@
       }
     });
   }
+// ---------------------------
+// Wind / leaf sway (เพิ่มได้โดยไม่แก้โค้ดอื่น)
+// วางบล็อกนี้ก่อนฟังก์ชัน animate() หรือก่อน animate(); ที่ท้ายไฟล์
+// ---------------------------
+
+const windMeshes = []; // เก็บข้อมูลเมชที่ได้รับเอฟเฟ็กต์ลม
+let windInitializedForTree = false;
+
+// หา index ของโมเดลต้นไม้จาก modelsMeta (ตรวจ url ชื่อ tree.glb)
+const treeModelIndex = modelsMeta.findIndex(m => m.url && m.url.toLowerCase().includes('tree.glb'));
+
+// สร้างข้อมูลพื้นฐานสำหรับ mesh ที่จะใช้ลม (clone geometry, เก็บตำแหน่งต้นฉบับ)
+
+function markWindOnModel(root){
+  root.traverse(node=>{
+    if(!node.isMesh) return;
+    try{
+      // clone geometry เพื่อไม่ให้กระทบ shared geometry
+      const geom = node.geometry.clone();
+      node.geometry = geom;
+      const posAttr = geom.attributes.position;
+      const normAttr = geom.attributes.normal;
+      if(!posAttr) return;
+      // เก็บตำแหน่งฐาน (Float32Array)
+      const base = new Float32Array(posAttr.array.length);
+      base.set(posAttr.array);
+
+      // คำนวณ bounding box ของ mesh เพื่อหา high/low (ใช้สำหรับ weight)
+      const bbox = new THREE.Box3().setFromBufferAttribute(posAttr);
+      const minY = bbox.min.y, maxY = bbox.max.y;
+      const height = Math.max(0.0001, maxY - minY);
+
+      // สร้าง weight per-vertex (0..1) ตามตำแหน่ง Y (ปลายใบ = 1)
+      const vertexWeight = new Float32Array(base.length / 3);
+      for(let v=0, j=0; v<vertexWeight.length; v++, j+=3){
+        const vy = base[j+1];
+        // normalized 0..1
+        const n = (vy - minY) / height;
+        // soften with ease curve (smoothstep-like): more movement near top
+        const w = n*n*(3 - 2*n); // smoothstep
+        vertexWeight[v] = w;
+      }
+
+      // push to windMeshes with stronger defaults
+      windMeshes.push({
+        mesh: node,
+        geometry: geom,
+        basePos: base,
+        vertexWeight: vertexWeight,
+        normalAttr: normAttr ? normAttr.array : null,
+        // ปรับพารามิเตอร์ให้พริ้วหนักขึ้น (แก้ได้ตามต้องการ)
+        amp: 0.18 * (node.userData.windScale || 1.0), // increased amplitude (was ~0.06)
+        freq: 0.9 + Math.random()*0.6,                 // frequency
+        phaseOffset: Math.random() * Math.PI * 2,
+        // per-mesh variation for gust sensitivity
+        gustSensitivity: 0.9 + Math.random()*0.6
+      });
+
+      node.castShadow = true;
+      node.receiveShadow = true;
+    }catch(e){ console.warn('markWindOnModel error', e); }
+  });
+}
+
+// ฟังก์ชันอัปเดตตำแหน่ง vertices ตามเวลาปัจจุบัน
+function updateWindMeshes(){
+  if(windMeshes.length === 0) return;
+  const t = performance.now() / 1000; // วินาที
+
+  // global gust (slow varying) -> makes occasional stronger gusts
+  const gust = 1.0 + Math.sin(t * 0.35) * 0.6 + Math.sin(t * 0.08 + 1.3) * 0.9;
+  // clamp 0.2..2.5
+  const gustClamped = Math.max(0.2, Math.min(2.5, gust));
+
+  for(let i=0;i<windMeshes.length;i++){
+    const info = windMeshes[i];
+    const geom = info.geometry;
+    const posAttr = geom.attributes.position;
+    const base = info.basePos;
+    const normals = info.normalAttr;
+    const weights = info.vertexWeight;
+    const amp = info.amp;
+    const freq = info.freq;
+    const phase = info.phaseOffset;
+    const gSens = info.gustSensitivity;
+
+    // stronger per-vertex wobble using vertex Y weight and gust
+    for(let v=0, j=0; v<weights.length; v++, j+=3){
+      const bx = base[j+0], by = base[j+1], bz = base[j+2];
+      const w = weights[v];
+
+      // spatial term to vary phase along model (so different leaves move differently)
+      const spatial = bx*0.15 + by*0.12 + bz*0.09;
+
+      // base wobble (time + spatial + phase)
+      const wobble = Math.sin(t * freq + spatial + phase);
+
+      // stronger effect near tips: scale by vertex weight^exponent for sharper tip motion
+      const tipFactor = Math.pow(w, 1.6); // exponent >1 => tip more dominant
+
+      // final strength includes global gust modulated by per-mesh sensitivity
+      const strength = wobble * amp * tipFactor * (1 + (gustClamped-1) * gSens);
+
+      if(normals){
+        posAttr.array[j+0] = bx + normals[j+0] * strength;
+        posAttr.array[j+1] = by + normals[j+1] * strength * 0.6; // Y less than normal dir
+        posAttr.array[j+2] = bz + normals[j+2] * strength;
+      } else {
+        // fallback: stronger lateral shift
+        posAttr.array[j+0] = bx + Math.sin(spatial + t*freq) * strength * 1.1;
+        posAttr.array[j+1] = by + Math.cos(spatial*0.5 + t*freq*0.8) * (strength*0.35);
+        posAttr.array[j+2] = bz + Math.cos(spatial + t*freq) * strength * 0.9;
+      }
+    }
+    posAttr.needsUpdate = true;
+  }
+}
+
+// วนเช็คว่า models[treeModelIndex] โหลดเสร็จหรือยัง แล้วติดปีกให้ (run แบบเบา ๆ)
+function ensureWindInit(){
+  if(windInitializedForTree) return;
+  if(treeModelIndex !== -1 && models[treeModelIndex]){
+    const root = models[treeModelIndex];
+    try{
+      markWindOnModel(root);
+      windInitializedForTree = true;
+      console.log('Wind: initialized on tree model index', treeModelIndex);
+    }catch(e){ console.warn('Wind init failed', e); }
+  }
+}
+
+// เริ่มลูปอิสระสำหรับอัพเดตลม (ไม่แก้ animate() เดิม)
+(function startWindLoop(){
+  function loop(){
+    ensureWindInit();
+    updateWindMeshes();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+
+// ---------------------------
+// จบบล็อก Wind
+// ---------------------------
 
   function animate(){
+    // update time uniform(s) for bom shader(s)
+    
+    
+// update time uniform(s) for bom shader(s)
+if(window.__bomShaderUniformsList && window.__bomShaderUniformsList.length){
+  const tsec = performance.now() / 8000;
+  for(const u of window.__bomShaderUniformsList){
+    u.time.value = tsec;
+    // ถ้าต้องการปรับแรงแบบ realtime ให้แก้ u.amplitude.value ที่นี่
+  }
+}
+
     requestAnimationFrame(animate);
 
     const now = performance.now();
-    const dt = (now - lastTime) / 5000; // seconds
+    const dt = (now - lastTime) / 5000;
     lastTime = now;
 
-    // auto-move the bom model to the right if loaded and active
     if(autoMoveActive && autoMoveIndex !== -1 && models[autoMoveIndex]){
       const nowAuto = performance.now();
       if(autoMoveStartTime === null) autoMoveStartTime = nowAuto;
       const elapsedMs = nowAuto - autoMoveStartTime;
-  const maxMs = autoMoveMaxMs;
+      const maxMs = autoMoveMaxMs;
       if(elapsedMs <= maxMs){
-        const remaining = Math.max(0, (maxMs - elapsedMs) / 0); // seconds left
+        const remaining = Math.max(0, (maxMs - elapsedMs) / 0);
         const moveDt = Math.min(dt, remaining);
-        const speed = 0.8; // units per second
+        const speed = 0.8;
         const dx = speed * moveDt;
         models[autoMoveIndex].position.x += dx;
-        // check collision; if collided, log and continue (do not stop or remove)
         const hit = checkIntersectionWithOthers(autoMoveIndex);
         if(hit !== -1){
           console.log('Auto-move: collision with model', hit, '; collision ignored, continuing.');
           status.textContent = `Auto-move: collision ignored (model ${hit})`;
-          // intentionally do not stop or remove the model on collision
         }
       } else {
-  // reached time limit
-  if(loopEnabled && models[autoMoveIndex]){
-    // reset position and restart
-    const init = models[autoMoveIndex].userData && models[autoMoveIndex].userData.__initialPosition;
-    if(init){ models[autoMoveIndex].position.copy(init); }
-    autoMoveStartTime = performance.now();
-    status.textContent = `Auto-move loop restarted`;
-  } else {
-    autoMoveActive = false;
-    status.textContent = `Auto-move finished (${Math.round(autoMoveMaxMs/1000)}s)`;
-  }
+        if(loopEnabled && models[autoMoveIndex]){
+          const init = models[autoMoveIndex].userData && models[autoMoveIndex].userData.__initialPosition;
+          if(init){ models[autoMoveIndex].position.copy(init); }
+          autoMoveStartTime = performance.now();
+          status.textContent = `Auto-move loop restarted`;
+        } else {
+          autoMoveActive = false;
+          status.textContent = `Auto-move finished (${Math.round(autoMoveMaxMs/1000)}s)`;
+        }
       }
     }
 
     if(cameraAnim.running){
-    const t=Math.min(1,(performance.now()-cameraAnim.startTime)/cameraAnim.duration);
-    const ease=t*t*(3-2*t);
-    camera.position.lerpVectors(cameraAnim.fromPos,cameraAnim.toPos,ease);
-    controls.target.lerpVectors(cameraAnim.fromTarget,cameraAnim.toTarget,ease);
-    controls.update();
-    if(t>=1) cameraAnim.running=false;
+      const t=Math.min(1,(performance.now()-cameraAnim.startTime)/cameraAnim.duration);
+      const ease=t*t*(3-2*t);
+      camera.position.lerpVectors(cameraAnim.fromPos,cameraAnim.toPos,ease);
+      controls.target.lerpVectors(cameraAnim.fromTarget,cameraAnim.toTarget,ease);
+      controls.update();
+      if(t>=1) cameraAnim.running=false;
     }
+    // rain update
+    updateRain();
     renderer.render(scene,camera);
   }
   animate();
